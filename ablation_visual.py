@@ -36,11 +36,20 @@ def build_llm_args(args):
     args.llm_args["gradient_checkpointing"] = getattr(args, "gradient_checkpointing", False)
     args.llm_args["ctc_weight"] = getattr(args, "ctc_weight", 1.0)
     args.llm_args["dataset"] = args.dataset
-    args.llm_args["gloss_dict"] = np.load(args.dataset_info['dict_path'], allow_pickle=True).item()
+    if args.dataset.lower() == "how2sign" and args.include_ctc:
+        raise ValueError("How2Sign manifests have no verified gloss annotations; set include_ctc: false.")
+    if args.dataset.lower() == "how2sign" and args.include_pose:
+        raise ValueError("How2Sign pose conversion is not supported; set include_pose: false.")
+    args.llm_args["gloss_dict"] = (np.load(args.dataset_info['dict_path'], allow_pickle=True).item()
+                                     if args.include_ctc else {})
+    if args.include_ctc and not args.llm_args["gloss_dict"]:
+        raise ValueError("CTC requires genuine compatible gloss annotations and a nonempty gloss dictionary.")
     args.llm_args["num_heads"] = args.temporal_args["num_heads"]
     args.llm_args["num_layers"] = args.temporal_args["num_layers"]
-    with open(args.dataset_info["pose_encoder_config_path"], 'r') as f:
-        args.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
+    args.llm_args["pose_encoder_cfg"] = {}
+    if args.include_pose:
+        with open(args.dataset_info["pose_encoder_config_path"], 'r') as f:
+            args.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
     return args
 
 

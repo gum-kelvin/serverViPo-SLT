@@ -1,4 +1,5 @@
 import os
+import warnings
 import torch
 import pickle
 import numpy as np
@@ -11,7 +12,7 @@ class PrecomputedFeatureDataset(Dataset):
         feature_dir, sp_dir, pose_dir, mo_dir,
         dataset="phoenix2014-T", mode="train",
         include_sp=True, include_pose=True, include_mo=True,
-        logger=None
+        logger=None, strict=None
     ):
         self.dataset = dataset
         self.feature_dir = feature_dir
@@ -19,7 +20,7 @@ class PrecomputedFeatureDataset(Dataset):
         self.pose_dir = pose_dir
         self.mo_dir = mo_dir
 
-        if not os.path.exists(self.mo_dir):
+        if include_mo and not os.path.exists(self.mo_dir):
             self.mo_dir = mo_dir.replace("/" + mode, "")
 
         self.mode = mode
@@ -34,22 +35,24 @@ class PrecomputedFeatureDataset(Dataset):
         self.sp_suffix = "_s2wrapping"
         self.mo_suffix = "_overlap-8"
 
-        self.files = [
-            fname.split(".")[0]
-            for fname in os.listdir(feature_dir)
-        ]
-        self.filter_missing()
-        if not self.files:
-            raise ValueError(f"No .pkl files found in directory: {feature_dir}")
-
+        self.strict = dataset.lower() == "how2sign" if strict is None else strict
+        if dataset.lower() == "how2sign" and self.include_pose:
+            raise ValueError("How2Sign pose conversion is not supported; disable include_pose.")
         self.anno_path = f"./preprocess/{dataset}/{mode}_info_ml.npy"
-        self.prep_annots(np.load(self.anno_path, allow_pickle=True).item())
-
-        # Pose features are only loaded when this modality is actually used.
-        # Loading them unconditionally crashes when pose_path is absent even
-        # though include_pose is False.
+        annots = np.load(self.anno_path, allow_pickle=True).item()
+        # The annotation manifest defines the intended samples; no frame sentinels.
+        self.files = [record["fileid"] for key, record in annots.items()
+                      if isinstance(key, int)]
+        if len(self.files) != len(set(self.files)):
+            raise ValueError(f"Duplicate fileids in {self.anno_path}")
+        if dataset.lower() == "how2sign" and any("." in name for name in self.files):
+            raise ValueError("How2Sign fileids must be period-free; regenerate the manifests.")
+        self.prep_annots(annots)
         if self.include_pose:
             self._pose_init(os.path.join(self.pose_dir, f"{dataset}.{mode}"), mode)
+        self.filter_missing()
+        if not self.files:
+            raise ValueError(f"No usable samples in {self.anno_path}; run extraction and validation.")
 
 
     def _pose_init(self, path, phase):
@@ -74,33 +77,37 @@ class PrecomputedFeatureDataset(Dataset):
             
 
     def filter_missing(self):
-        to_remove = []
-        for f in self.files:
-            # if not os.path.exists(os.path.join(self.sp_dir, f + f"{self.sp_suffix}.npy")):
-            if not os.path.exists(os.path.join(self.sp_dir, f + f".npy")):
-                to_remove.append(f)
-
-        for f in to_remove:
-            self.files.remove(f)
-
+        missing = []
+        for fileid in self.files:
+            absent = []
+            if self.include_sp and not os.path.isfile(os.path.join(self.sp_dir, fileid + ".npy")):
+                absent.append("spatial")
+            if self.include_mo and not os.path.isfile(os.path.join(self.mo_dir, fileid + ".npy")):
+                absent.append("motion")
+            if self.include_pose and f"{self.mode}/{fileid}" not in self.pose_dict:
+                absent.append("pose")
+            if absent:
+                missing.append((fileid, absent))
+        if missing:
+            message = (f"Missing enabled features for {len(missing)}/{len(self.files)} samples "
+                       f"in {self.dataset}/{self.mode}: {missing[:10]}")
+            if self.strict:
+                raise ValueError(message + "; finish extraction or use strict=False for diagnostics.")
+            warnings.warn(message + "; excluding incomplete samples.", RuntimeWarning)
+            excluded = {fileid for fileid, _ in missing}
+            self.files = [fileid for fileid in self.files if fileid not in excluded]
 
     def prep_annots(self, annots):
-        if "prefix" in annots: del annots["prefix"]
-
         langs = ["en", "fr", "es"]
         self.translations, self.text, self.gloss = {}, {}, {}
-        for i in range(len(annots)):
-            self.translations[annots[i]["fileid"]] = {lang: annots[i][f"{lang}_text"] for lang in langs if f"{lang}_text" in annots[i]}
-            self.text[annots[i]["fileid"]] = annots[i]["text"] if "text" in annots[i] else ""
-            self.gloss[annots[i]["fileid"]] = annots[i]["gloss"] if "gloss" in annots[i] else annots[i]["label"]
-
-        to_remove = []
-        for key in self.translations.keys():
-            if key not in self.files:
-                to_remove.append(key)
-
-        for key in to_remove:
-            del self.translations[key]
+        for key, record in annots.items():
+            if not isinstance(key, int):
+                continue
+            fileid = record["fileid"]
+            self.translations[fileid] = {lang: record[f"{lang}_text"] for lang in langs
+                                         if f"{lang}_text" in record}
+            self.text[fileid] = record.get("text", "")
+            self.gloss[fileid] = record.get("gloss", record.get("label", ""))
 
     def __len__(self):
         return len(self.files)
@@ -116,7 +123,7 @@ class PrecomputedFeatureDataset(Dataset):
         pose_ft = self.pose_dict[f"{self.mode}/{self.files[idx].replace('.pkl', '')}"]["keypoint"].permute(2, 0, 1).to(torch.float32) if self.include_pose else None
         mo_ft = torch.tensor(np.load(mo_ft_path), dtype=torch.float32) if self.include_mo else None
 
-        fileid = self.files[idx].replace(".pkl", "")
+        fileid = self.files[idx]
         gloss = self.gloss[fileid]
         text = self.text[fileid]
 

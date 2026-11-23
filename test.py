@@ -59,11 +59,20 @@ def setup_work_dir(arg, WORK_DIR_PATH):
     arg.llm_args["llm_precision"] = getattr(arg, "llm_precision", "fp32")
     arg.llm_args["gradient_checkpointing"] = getattr(arg, "gradient_checkpointing", False)
     arg.llm_args["dataset"] = arg.dataset
-    arg.llm_args["gloss_dict"] = np.load(arg.dataset_info['dict_path'], allow_pickle=True).item()
+    if arg.dataset.lower() == "how2sign" and arg.include_ctc:
+        raise ValueError("How2Sign manifests have no verified gloss annotations; set include_ctc: false.")
+    if arg.dataset.lower() == "how2sign" and arg.include_pose:
+        raise ValueError("How2Sign pose conversion is not supported; set include_pose: false.")
+    arg.llm_args["gloss_dict"] = (np.load(arg.dataset_info['dict_path'], allow_pickle=True).item()
+                                     if arg.include_ctc else {})
+    if arg.include_ctc and not arg.llm_args["gloss_dict"]:
+        raise ValueError("CTC requires genuine compatible gloss annotations and a nonempty gloss dictionary.")
     arg.llm_args["num_heads"] = arg.temporal_args["num_heads"]
     arg.llm_args["num_layers"] = arg.temporal_args["num_layers"]
-    with open(arg.dataset_info["pose_encoder_config_path"], 'r') as f:
-        arg.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
+    arg.llm_args["pose_encoder_cfg"] = {}
+    if arg.include_pose:
+        with open(arg.dataset_info["pose_encoder_config_path"], 'r') as f:
+            arg.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
 
     ft_dataset = import_class(arg.feeder_ft)
 
@@ -77,6 +86,11 @@ def setup_data(arg):
         dataset_list = zip(["test"], [False]) 
     elif arg.dataset == 'CSL-Daily':
         dataset_list = zip(["test"], [False])
+
+    elif 'how2sign' in arg.dataset.lower():
+        dataset_list = zip(["test"], [False])
+    else:
+        raise ValueError(f"Unsupported dataset: {arg.dataset}")
 
     data_loader = {}
     ft_dataset = import_class(arg.feeder_ft)

@@ -80,12 +80,21 @@ def setup_work_dir(arg, is_main, WORK_DIR_PATH):
     arg.llm_args["llm_precision"] = getattr(arg, "llm_precision", "fp32")
     arg.llm_args["gradient_checkpointing"] = getattr(arg, "gradient_checkpointing", False)
     arg.llm_args["ctc_weight"] = getattr(arg, "ctc_weight", 1.0)
-    arg.llm_args["gloss_dict"] = np.load(arg.dataset_info['dict_path'], allow_pickle=True).item()
+    if arg.dataset.lower() == "how2sign" and arg.include_ctc:
+        raise ValueError("How2Sign manifests have no verified gloss annotations; set include_ctc: false.")
+    if arg.dataset.lower() == "how2sign" and arg.include_pose:
+        raise ValueError("How2Sign pose conversion is not supported; set include_pose: false.")
+    arg.llm_args["gloss_dict"] = (np.load(arg.dataset_info['dict_path'], allow_pickle=True).item()
+                                     if arg.include_ctc else {})
+    if arg.include_ctc and not arg.llm_args["gloss_dict"]:
+        raise ValueError("CTC requires genuine compatible gloss annotations and a nonempty gloss dictionary.")
     arg.llm_args["dataset"] = arg.dataset
     arg.llm_args["num_heads"] = arg.temporal_args["num_heads"]
     arg.llm_args["num_layers"] = arg.temporal_args["num_layers"]
-    with open(arg.dataset_info["pose_encoder_config_path"], 'r') as f:
-        arg.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
+    arg.llm_args["pose_encoder_cfg"] = {}
+    if arg.include_pose:
+        with open(arg.dataset_info["pose_encoder_config_path"], 'r') as f:
+            arg.llm_args["pose_encoder_cfg"] = yaml.safe_load(f)["model"]["RecognitionNetwork"]
 
     ft_dataset = import_class(arg.feeder_ft)
     shutil.copy2(inspect.getfile(ft_dataset), WORK_DIR_PATH)
@@ -101,6 +110,11 @@ def setup_data(arg, world_size, rank, is_main):
         dataset_list = zip(["train", "dev", "test"], [True, False, False]) 
     elif arg.dataset == 'CSL-Daily':
         dataset_list = zip(["train", "dev", "test"], [True, False, False, False])
+
+    elif 'how2sign' in arg.dataset.lower():
+        dataset_list = zip(["train", "dev", "test"], [True, False, False])
+    else:
+        raise ValueError(f"Unsupported dataset: {arg.dataset}")
 
     data_loader, sampler = {}, {}
     ft_dataset = import_class(arg.feeder_ft)
@@ -398,4 +412,6 @@ if __name__ == '__main__':
         shutil.copy2(f"./modules/ff.py", WORK_DIR_PATH)
 
     world_size = torch.cuda.device_count()
+    if world_size == 0:
+        raise RuntimeError("Training requires CUDA; no CUDA device was detected. Run the external CPU smoke-test first.")
     torch.multiprocessing.spawn(main, args=(world_size, args, WORK_DIR_PATH), nprocs=world_size, join=True)

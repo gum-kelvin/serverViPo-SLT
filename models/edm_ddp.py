@@ -71,6 +71,7 @@ class EDM(nn.Module):
     def _prepare_llm(self, model: str) -> None:
         llm_dtype = self._resolve_llm_dtype()
         if "bart" in model.lower():
+            self.bart_lang_heads["How2Sign"] = "en_XX"
             self.llm = MBartForConditionalGeneration.from_pretrained(model, torch_dtype=llm_dtype)
             self.tokenizer = MBart50TokenizerFast.from_pretrained(
                 model, 
